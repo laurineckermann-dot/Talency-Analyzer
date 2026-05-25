@@ -84,77 +84,109 @@ app.get('/api/kununu', async (req, res) => {
   let slugVariants = [];
   try { slugVariants = slugsParam ? JSON.parse(slugsParam) : []; } catch {}
 
+  // Step 1: Kununu search to find correct slug
   if (!slugVariants.length) {
-    const base = query.toLowerCase()
-      .replace(/ä/g,'ae').replace(/ö/g,'oe').replace(/ü/g,'ue').replace(/ß/g,'ss')
-      .replace(/[^a-z0-9\s]/g,'').trim().replace(/\s+/g,'-');
-    slugVariants = [base, base.split('-').pop()];
+    try {
+      const searchResp = await axios.get(
+        'https://www.kununu.com/de/search?term=' + encodeURIComponent(query),
+        { headers: BROWSER_HEADERS, timeout: 8000, validateStatus: s => s < 500 }
+      );
+      const $s = cheerio.load(searchResp.data);
+      $s('a[href^="/de/"]').each((_, el) => {
+        const href = $s(el).attr('href');
+        if (href && /^\/de\/[a-z0-9-]+$/.test(href) && !href.includes('search')) {
+          const slug = href.replace('/de/', '');
+          if (!slugVariants.includes(slug)) slugVariants.unshift(slug);
+        }
+      });
+    } catch(e) { console.log('Kununu search failed:', e.message); }
+
+    // Manual slug variants as fallback
+    const norm = query.toLowerCase()
+      .replace(/\u00e4/g,'ae').replace(/\u00f6/g,'oe').replace(/\u00fc/g,'ue').replace(/\u00df/g,'ss')
+      .replace(/[^a-z0-9\s]/g,'').trim();
+    const parts = norm.split(/\s+/);
+    const stop = ['stadt','landkreis','kreis','gemeinde','amt','der','die','das','von'];
+    const core = parts.filter(p => !stop.includes(p));
+    const extras = [
+      parts.join('-'), core.join('-'), parts.slice(-1)[0], core[0],
+      'stadt-' + core.join('-'), 'stadtverwaltung-' + core.join('-'),
+      'kreisverwaltung-' + core.join('-'), 'gemeinde-' + core.join('-'),
+    ].filter((s, i, a) => s && s.length > 2 && a.indexOf(s) === i);
+    extras.forEach(s => { if (!slugVariants.includes(s)) slugVariants.push(s); });
   }
 
   for (const slug of slugVariants) {
-    const profileUrl = `https://www.kununu.com/de/${slug}`;
+    const profileUrl = 'https://www.kununu.com/de/' + slug;
     try {
       const resp = await axios.get(profileUrl, {
-        headers: BROWSER_HEADERS,
-        timeout: 9000,
-        validateStatus: s => s < 500
+        headers: BROWSER_HEADERS, timeout: 9000, validateStatus: s => s < 500
       });
       if (resp.status !== 200 || resp.data.length < 500) continue;
 
       const $ = cheerio.load(resp.data);
 
-      let overallScore = null;
-      for (const sel of [
-        '[data-test="score-overview-total"]',
-        '.score-overview__score',
-        'span[class*="score"]',
-        'div[class*="overall"] span'
-      ]) {
-        const text = $(sel).first().text().trim();
-        const num = parseFloat(text.replace(',', '.'));
-        if (num >= 1 && num <= 5) { overallScore = num; break; }
+      // Try JSON-LD first (most reliable)
+      let overallScore = null, reviewCount = 0;
+      $('script[type="application/ld+json"]').each((_, el) => {
+        try {
+          const json = JSON.parse($(el).html());
+          if (json.aggregateRating) {
+            overallScore = parseFloat(json.aggregateRating.ratingValue);
+            reviewCount = parseInt(json.aggregateRating.reviewCount) || 0;
+          }
+        } catch {}
+      });
+
+      // CSS selector fallback
+      if (!overallScore) {
+        for (const sel of ['[data-test="score-overview-total"]','.score-overview__score','span[class*="score"]','div[class*="overall"] span']) {
+          const text = $(sel).first().text().trim();
+          const num = parseFloat(text.replace(',', '.'));
+          if (num >= 1 && num <= 5) { overallScore = num; break; }
+        }
       }
 
-      let reviewCount = 0;
-      $('*').each((_, el) => {
-        const m = $(el).text().match(/(\d+)\s*Bewertungen?/i);
-        if (m && parseInt(m[1]) > reviewCount) reviewCount = parseInt(m[1]);
-      });
-
-      let recommendRate = null;
-      $('*').each((_, el) => {
-        const m = $(el).text().match(/(\d+)\s*%.*empfehlen/i);
-        if (m) { recommendRate = parseInt(m[1]); return false; }
-      });
-
-      const reviews = [];
-      $('[data-test*="review"], article[class*="review"], div[class*="review-item"]')
-        .slice(0, 4).each((_, el) => {
-          const t = $(el).text().replace(/\s+/g, ' ').trim().slice(0, 200);
-          if (t.length > 40) reviews.push(t);
+      // Review count fallback
+      if (!reviewCount) {
+        $('*').each((_, el) => {
+          const m = $(el).clone().children().remove().end().text().match(/(\d+)\s*Bewertungen?/i);
+          if (m && parseInt(m[1]) > reviewCount) reviewCount = parseInt(m[1]);
         });
+      }
+
+      // Recommend rate
+      let recommendRate = null;
+      const bodyText = $.text();
+      const recMatch = bodyText.match(/(\d+)\s*%[^%]{0,30}(empfehlen|Weiterempfehlung)/i);
+      if (recMatch) recommendRate = parseInt(recMatch[1]);
+
+      // Review snippets
+      const reviews = [];
+      $('[data-test*="review"], article[class*="review"], div[class*="review-item"]').slice(0,4).each((_, el) => {
+        const t = $(el).text().replace(/\s+/g,' ').trim().slice(0,200);
+        if (t.length > 40) reviews.push(t);
+      });
 
       const found = overallScore !== null || reviewCount > 0;
       if (!found) continue;
 
+      console.log('Kununu found:', query, '-> slug:', slug, 'score:', overallScore, 'reviews:', reviewCount);
+
       return res.json({
-        found: true,
-        query,
-        slug,
-        profileUrl,
-        overallScore,
-        reviewCount,
-        recommendRate,
-        reviews: reviews.slice(0, 3),
+        found: true, query, slug, profileUrl,
+        overallScore, reviewCount, recommendRate,
+        reviews: reviews.slice(0,3),
         candidateScore: Math.min(100, Math.round(
           ((overallScore || 3) / 5) * 60 +
           (recommendRate ? recommendRate * 0.3 : 15) +
           Math.min(10, reviewCount)
         ))
       });
-    } catch { continue; }
+    } catch(e) { console.log('Kununu slug failed:', slug, e.message); continue; }
   }
 
+  console.log('Kununu: no profile found for "' + query + '", tried:', slugVariants.join(', '));
   res.json({ found: false, query, candidateScore: 0, reason: 'Kein Kununu-Profil gefunden' });
 });
 
