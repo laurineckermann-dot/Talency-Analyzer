@@ -223,19 +223,105 @@ async function checkCareerPage(query) {
   const slug = query.toLowerCase()
     .replace(/ä/g,'ae').replace(/ö/g,'oe').replace(/ü/g,'ue').replace(/ß/g,'ss')
     .replace(/\s+/g,'-').replace(/[^a-z0-9-]/g,'');
+
   const urls = [
     `https://www.${slug}.de/karriere`,
     `https://www.${slug}.de/jobs`,
     `https://karriere.${slug}.de`,
-    `https://www.${slug}.de/stellenangebote`
+    `https://www.${slug}.de/stellenangebote`,
+    `https://www.${slug}.de/arbeitgeber`,
+    `https://jobs.${slug}.de`
   ];
+
   for (const url of urls) {
     try {
-      const r = await axios.get(url, { headers: BROWSER_HEADERS, timeout: 5000, validateStatus: s => s < 500 });
-      if (r.status === 200 && r.data.length > 500) return { found: true, url, score: 40 };
+      const r = await axios.get(url, { headers: BROWSER_HEADERS, timeout: 6000, validateStatus: s => s < 500 });
+      if (r.status !== 200 || r.data.length < 500) continue;
+
+      const $ = cheerio.load(r.data);
+      const html = r.data.toLowerCase();
+      const text = $.text().toLowerCase();
+
+      // ── Kriterien-Bewertung ──────────────────────────────────────
+      let score = 15; // Basis: Karriereseite existiert
+      const criteria = [];
+
+      // 1. Imagevideo (YouTube, Vimeo, video-Tag, iframe mit video) → +20 Punkte
+      const hasVideo =
+        html.includes('youtube.com/embed') ||
+        html.includes('youtu.be') ||
+        html.includes('vimeo.com') ||
+        html.includes('<video') ||
+        html.includes('recruitingfilm') ||
+        html.includes('imagevideo') ||
+        html.includes('arbeitgebervideo') ||
+        $('iframe[src*="youtube"], iframe[src*="vimeo"], video').length > 0;
+      if (hasVideo) { score += 20; criteria.push('📹 Imagevideo vorhanden'); }
+      else { criteria.push('❌ Kein Imagevideo'); }
+
+      // 2. Offene Stellen direkt auf der Seite → +15 Punkte
+      const hasJobs =
+        text.includes('stellenangebot') ||
+        text.includes('offene stellen') ||
+        text.includes('jetzt bewerben') ||
+        text.includes('stellenausschreibung') ||
+        $('a[href*="stell"], a[href*="job"], a[href*="bewerbung"]').length > 2;
+      if (hasJobs) { score += 15; criteria.push('✅ Stellenangebote sichtbar'); }
+      else { criteria.push('❌ Keine Stellenangebote sichtbar'); }
+
+      // 3. Arbeitgeberversprechen / Benefits → +10 Punkte
+      const hasBenefits =
+        text.includes('benefit') ||
+        text.includes('wir bieten') ||
+        text.includes('ihre vorteile') ||
+        text.includes('work-life') ||
+        text.includes('homeoffice') ||
+        text.includes('flexible arbeitszeit') ||
+        text.includes('weiterbildung') ||
+        text.includes('warum wir');
+      if (hasBenefits) { score += 10; criteria.push('✅ Benefits / Arbeitgeberversprechen'); }
+      else { criteria.push('❌ Keine Benefits kommuniziert'); }
+
+      // 4. Bilder / Fotos von echten Mitarbeitern → +8 Punkte
+      const hasImages =
+        $('img').length > 3 &&
+        (html.includes('team') || html.includes('mitarbeiter') || html.includes('kollegen'));
+      if (hasImages) { score += 8; criteria.push('✅ Team-Bilder vorhanden'); }
+      else { criteria.push('❌ Keine Team-Bilder erkannt'); }
+
+      // 5. Kontakt / Ansprechpartner → +7 Punkte
+      const hasContact =
+        text.includes('ansprechpartner') ||
+        text.includes('recruiter') ||
+        text.includes('personalreferat') ||
+        text.includes('hr-team') ||
+        text.includes('bewerbung@') ||
+        $('a[href^="mailto:"]').length > 0;
+      if (hasContact) { score += 7; criteria.push('✅ Ansprechpartner / Kontakt'); }
+      else { criteria.push('❌ Kein Ansprechpartner'); }
+
+      // 6. Mobiloptimierung (viewport meta tag) → +5 Punkte
+      const hasMobile = html.includes('viewport') && html.includes('width=device-width');
+      if (hasMobile) { score += 5; criteria.push('✅ Mobiloptimiert'); }
+      else { criteria.push('❌ Nicht mobiloptimiert'); }
+
+      console.log(`Career page: ${url} → score ${score}, video: ${hasVideo}`);
+
+      return {
+        found: true,
+        url,
+        score: Math.min(100, score),
+        hasVideo,
+        hasJobs,
+        hasBenefits,
+        hasImages,
+        hasContact,
+        hasMobile,
+        criteria
+      };
     } catch { continue; }
   }
-  return { found: false, score: 8 };
+  return { found: false, score: 5, criteria: ['❌ Keine Karriereseite gefunden'] };
 }
 
 async function checkJobPortals(query) {
