@@ -226,7 +226,7 @@ async function checkCareerPage(query) {
     const searchQuery = encodeURIComponent(`${query} Karriere Stellenangebote`);
     const searchResp = await axios.get(
       `https://www.google.de/search?q=${searchQuery}&num=5&hl=de`,
-      { headers: { ...BROWSER_HEADERS, 'Accept': 'text/html' }, timeout: 8000, validateStatus: s => s < 500 }
+      { headers: { ...BROWSER_HEADERS, 'Accept': 'text/html' }, timeout: 4000, validateStatus: s => s < 500 }
     );
     const $g = cheerio.load(searchResp.data);
     // Extract result URLs from Google
@@ -271,12 +271,12 @@ async function checkCareerPage(query) {
     `https://www.${slug}.de/arbeitgeber`
   ];
 
-  // Combine: Google results first, then fallbacks
-  const allUrls = [...new Set([...careerUrls.slice(0,3), ...fallbackUrls])];
+  // Combine: Google results first, then fallbacks — max 5 total to keep response fast
+  const allUrls = [...new Set([...careerUrls.slice(0,2), ...fallbackUrls])].slice(0,5);
 
   for (const url of allUrls) {
     try {
-      const r = await axios.get(url, { headers: BROWSER_HEADERS, timeout: 6000, validateStatus: s => s < 500 });
+      const r = await axios.get(url, { headers: BROWSER_HEADERS, timeout: 4000, validateStatus: s => s < 500 });
       if (r.status !== 200 || r.data.length < 500) continue;
 
       const $ = cheerio.load(r.data);
@@ -381,4 +381,3 @@ app.listen(PORT, () => {
   console.log(`✅ Talency Analyzer API → http://localhost:${PORT}`);
   console.log(`   /api/meta-validate · /api/meta-ads · /api/kununu · /api/employer-branding`);
 });
-
