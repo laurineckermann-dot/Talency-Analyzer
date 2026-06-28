@@ -220,20 +220,61 @@ async function checkLinkedIn(query) {
 }
 
 async function checkCareerPage(query) {
+  // Step 1: Google-Suche nach der echten Karriereseite
+  const careerUrls = [];
+  try {
+    const searchQuery = encodeURIComponent(`${query} Karriere Stellenangebote`);
+    const searchResp = await axios.get(
+      `https://www.google.de/search?q=${searchQuery}&num=5&hl=de`,
+      { headers: { ...BROWSER_HEADERS, 'Accept': 'text/html' }, timeout: 8000, validateStatus: s => s < 500 }
+    );
+    const $g = cheerio.load(searchResp.data);
+    // Extract result URLs from Google
+    $g('a[href^="/url?q="]').each((_, el) => {
+      const href = $g(el).attr('href') || '';
+      const match = href.match(/\/url\?q=(https?:\/\/[^&]+)/);
+      if (match) {
+        const url = decodeURIComponent(match[1]);
+        // Only keep .de domains, skip job portals and aggregators
+        if (url.includes('.de') &&
+            !url.includes('google') &&
+            !url.includes('stepstone') &&
+            !url.includes('indeed') &&
+            !url.includes('linkedin') &&
+            !url.includes('kununu') &&
+            !url.includes('meinestadt') &&
+            !url.includes('stellenmarkt') &&
+            !url.includes('jobs-beim-staat') &&
+            !url.includes('wikipedia')) {
+          careerUrls.push(url);
+        }
+      }
+    });
+    console.log(`Career search for "${query}": found URLs:`, careerUrls.slice(0,3));
+  } catch(e) {
+    console.log('Google career search failed:', e.message);
+  }
+
+  // Step 2: Fallback — klassische URL-Muster
   const slug = query.toLowerCase()
     .replace(/ä/g,'ae').replace(/ö/g,'oe').replace(/ü/g,'ue').replace(/ß/g,'ss')
     .replace(/\s+/g,'-').replace(/[^a-z0-9-]/g,'');
-
-  const urls = [
+  const core = slug.replace(/^(stadt|landkreis|kreis|gemeinde)-/,'');
+  const fallbackUrls = [
+    `https://www.${core}.de/rathaus-service/karriere`,
+    `https://www.${core}.de/karriere`,
+    `https://www.${core}.de/jobs`,
+    `https://karriere.${core}.de`,
+    `https://www.${core}.de/stellenangebote`,
     `https://www.${slug}.de/karriere`,
-    `https://www.${slug}.de/jobs`,
-    `https://karriere.${slug}.de`,
-    `https://www.${slug}.de/stellenangebote`,
-    `https://www.${slug}.de/arbeitgeber`,
-    `https://jobs.${slug}.de`
+    `https://www.${slug}.de/rathaus/karriere`,
+    `https://www.${slug}.de/arbeitgeber`
   ];
 
-  for (const url of urls) {
+  // Combine: Google results first, then fallbacks
+  const allUrls = [...new Set([...careerUrls.slice(0,3), ...fallbackUrls])];
+
+  for (const url of allUrls) {
     try {
       const r = await axios.get(url, { headers: BROWSER_HEADERS, timeout: 6000, validateStatus: s => s < 500 });
       if (r.status !== 200 || r.data.length < 500) continue;
@@ -340,3 +381,4 @@ app.listen(PORT, () => {
   console.log(`✅ Talency Analyzer API → http://localhost:${PORT}`);
   console.log(`   /api/meta-validate · /api/meta-ads · /api/kununu · /api/employer-branding`);
 });
+
