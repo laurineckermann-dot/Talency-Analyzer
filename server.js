@@ -93,7 +93,16 @@ app.get('/api/kununu', async (req, res) => {
 
   // Fix 1b-4: Die Kununu-Suche laeuft IMMER (sie findet den echten Slug,
   // z.B. "landeshauptstadt-muenchen"). Client-Slugs werden nur angehaengt.
-  let slugVariants = [];
+  // Namens-Kernbegriffe zuerst berechnen — damit filtern wir die Suchtreffer.
+  const norm = query.toLowerCase()
+    .replace(/\u00e4/g,'ae').replace(/\u00f6/g,'oe').replace(/\u00fc/g,'ue').replace(/\u00df/g,'ss')
+    .replace(/[^a-z0-9\s]/g,'').trim();
+  const parts = norm.split(/\s+/);
+  const stop = ['stadt','landkreis','kreis','gemeinde','amt','markt','der','die','das','von'];
+  const core = parts.filter(p => !stop.includes(p));
+  const coreTerms = core.length ? core : parts;
+
+  let searchHits = [];
   try {
     attempts++;
     const searchResp = await axios.get(
@@ -105,18 +114,17 @@ app.get('/api/kununu', async (req, res) => {
       const href = $s(el).attr('href');
       if (href && /^\/de\/[a-z0-9-]+$/.test(href) && !href.includes('search')) {
         const slug = href.replace('/de/', '');
-        if (!slugVariants.includes(slug)) slugVariants.push(slug);
+        // Nur Treffer, die einen Kernbegriff des Namens enthalten —
+        // sonst landen Navigationslinks (impressum, login, ...) in der Liste
+        if (coreTerms.some(t => slug.includes(t)) && !searchHits.includes(slug)) {
+          searchHits.push(slug);
+        }
       }
     });
   } catch(e) { console.log('Kununu search failed:', e.message); fetchErrors++; }
 
-  // Manual slug variants as fallback
-  const norm = query.toLowerCase()
-    .replace(/\u00e4/g,'ae').replace(/\u00f6/g,'oe').replace(/\u00fc/g,'ue').replace(/\u00df/g,'ss')
-    .replace(/[^a-z0-9\s]/g,'').trim();
-  const parts = norm.split(/\s+/);
-  const stop = ['stadt','landkreis','kreis','gemeinde','amt','der','die','das','von'];
-  const core = parts.filter(p => !stop.includes(p));
+  // Reihenfolge: max. 2 relevante Suchtreffer, dann manuelle Varianten, dann Client-Slugs
+  let slugVariants = searchHits.slice(0, 2);
   const extras = [
     parts.join('-'), core.join('-'), parts.slice(-1)[0], core[0],
     'stadt-' + core.join('-'), 'stadtverwaltung-' + core.join('-'),
@@ -127,6 +135,7 @@ app.get('/api/kununu', async (req, res) => {
 
   // A5: maximal 5 Slug-Varianten testen (statt bis zu ~10)
   slugVariants = slugVariants.slice(0, 5);
+  console.log('Kununu slugs for "' + query + '":', slugVariants.join(', '));
 
   for (const slug of slugVariants) {
     // A5: Zeitbudget prüfen, bevor der nächste Slug probiert wird
