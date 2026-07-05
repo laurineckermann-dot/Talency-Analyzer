@@ -81,48 +81,49 @@ app.get('/api/kununu', async (req, res) => {
   const { query, slugs: slugsParam } = req.query;
   if (!query) return res.status(400).json({ error: 'query erforderlich' });
 
-  let slugVariants = [];
-  try { slugVariants = slugsParam ? JSON.parse(slugsParam) : []; } catch {}
+  let clientSlugs = [];
+  try { clientSlugs = slugsParam ? JSON.parse(slugsParam) : []; } catch {}
 
   // A5: Gesamt-Zeitbudget — muss unter dem Frontend-Timeout (25s) bleiben
   const started = Date.now();
-  const TIME_BUDGET_MS = 18000;
+  const TIME_BUDGET_MS = 20000;
 
   // A4: Request-Fehler (Netzwerk/Timeout) getrennt von "kein Profil" zählen
   let attempts = 0, fetchErrors = 0;
 
-  // Step 1: Kununu search to find correct slug
-  if (!slugVariants.length) {
-    try {
-      attempts++;
-      const searchResp = await axios.get(
-        'https://www.kununu.com/de/search?term=' + encodeURIComponent(query),
-        { headers: BROWSER_HEADERS, timeout: 8000, validateStatus: s => s < 500 }
-      );
-      const $s = cheerio.load(searchResp.data);
-      $s('a[href^="/de/"]').each((_, el) => {
-        const href = $s(el).attr('href');
-        if (href && /^\/de\/[a-z0-9-]+$/.test(href) && !href.includes('search')) {
-          const slug = href.replace('/de/', '');
-          if (!slugVariants.includes(slug)) slugVariants.unshift(slug);
-        }
-      });
-    } catch(e) { console.log('Kununu search failed:', e.message); fetchErrors++; }
+  // Fix 1b-4: Die Kununu-Suche laeuft IMMER (sie findet den echten Slug,
+  // z.B. "landeshauptstadt-muenchen"). Client-Slugs werden nur angehaengt.
+  let slugVariants = [];
+  try {
+    attempts++;
+    const searchResp = await axios.get(
+      'https://www.kununu.com/de/search?term=' + encodeURIComponent(query),
+      { headers: BROWSER_HEADERS, timeout: 6000, validateStatus: s => s < 500 }
+    );
+    const $s = cheerio.load(searchResp.data);
+    $s('a[href^="/de/"]').each((_, el) => {
+      const href = $s(el).attr('href');
+      if (href && /^\/de\/[a-z0-9-]+$/.test(href) && !href.includes('search')) {
+        const slug = href.replace('/de/', '');
+        if (!slugVariants.includes(slug)) slugVariants.push(slug);
+      }
+    });
+  } catch(e) { console.log('Kununu search failed:', e.message); fetchErrors++; }
 
-    // Manual slug variants as fallback
-    const norm = query.toLowerCase()
-      .replace(/\u00e4/g,'ae').replace(/\u00f6/g,'oe').replace(/\u00fc/g,'ue').replace(/\u00df/g,'ss')
-      .replace(/[^a-z0-9\s]/g,'').trim();
-    const parts = norm.split(/\s+/);
-    const stop = ['stadt','landkreis','kreis','gemeinde','amt','der','die','das','von'];
-    const core = parts.filter(p => !stop.includes(p));
-    const extras = [
-      parts.join('-'), core.join('-'), parts.slice(-1)[0], core[0],
-      'stadt-' + core.join('-'), 'stadtverwaltung-' + core.join('-'),
-      'kreisverwaltung-' + core.join('-'), 'gemeinde-' + core.join('-'),
-    ].filter((s, i, a) => s && s.length > 2 && a.indexOf(s) === i);
-    extras.forEach(s => { if (!slugVariants.includes(s)) slugVariants.push(s); });
-  }
+  // Manual slug variants as fallback
+  const norm = query.toLowerCase()
+    .replace(/\u00e4/g,'ae').replace(/\u00f6/g,'oe').replace(/\u00fc/g,'ue').replace(/\u00df/g,'ss')
+    .replace(/[^a-z0-9\s]/g,'').trim();
+  const parts = norm.split(/\s+/);
+  const stop = ['stadt','landkreis','kreis','gemeinde','amt','der','die','das','von'];
+  const core = parts.filter(p => !stop.includes(p));
+  const extras = [
+    parts.join('-'), core.join('-'), parts.slice(-1)[0], core[0],
+    'stadt-' + core.join('-'), 'stadtverwaltung-' + core.join('-'),
+    'kreisverwaltung-' + core.join('-'), 'gemeinde-' + core.join('-'),
+  ].filter((s, i, a) => s && s.length > 2 && a.indexOf(s) === i);
+  extras.forEach(s => { if (!slugVariants.includes(s)) slugVariants.push(s); });
+  clientSlugs.forEach(s => { if (!slugVariants.includes(s)) slugVariants.push(s); });
 
   // A5: maximal 5 Slug-Varianten testen (statt bis zu ~10)
   slugVariants = slugVariants.slice(0, 5);
@@ -137,7 +138,7 @@ app.get('/api/kununu', async (req, res) => {
     try {
       attempts++;
       const resp = await axios.get(profileUrl, {
-        headers: BROWSER_HEADERS, timeout: 6000, validateStatus: s => s < 500
+        headers: BROWSER_HEADERS, timeout: 5000, validateStatus: s => s < 500
       });
       if (resp.status !== 200 || resp.data.length < 500) continue;
 
@@ -232,22 +233,33 @@ app.get('/api/employer-branding', async (req, res) => {
     checkJobPortals(query)
   ]).then(r => r.map(x => x.status === 'fulfilled' ? x.value : { found: false, score: 0 }));
 
+  // Fix 1b-2: Skala ergibt exakt 100 — Karriereseite (bis 80) + Stepstone (bis 20).
+  // LinkedIn fliesst NICHT mehr ein (Fix 1b-1): der Check ist wegen der
+  // Login-Wand unzuverlaessig und hat vorher jedem 35 Punkte geschenkt.
   res.json({
     linkedin, career, portals,
-    employerScore: Math.min(100, linkedin.score + career.score + portals.score)
+    employerScore: Math.min(100, career.score + portals.score)
   });
 });
 
 async function checkLinkedIn(query) {
+  // Fix 1b-1: nur noch informativ, 0 Punkte. LinkedIn liefert Scrapern fast
+  // immer eine Login-Wand (Status 200!) oder Status 999 — beides ist kein
+  // verlaessliches Signal fuer ein gepflegtes Arbeitgeberprofil.
   try {
     const slug = query.toLowerCase()
       .replace(/ä/g,'ae').replace(/ö/g,'oe').replace(/ü/g,'ue')
       .replace(/\s+/g,'-').replace(/[^a-z0-9-]/g,'');
     const r = await axios.get(`https://www.linkedin.com/company/${slug}`, {
-      headers: BROWSER_HEADERS, timeout: 6000, validateStatus: s => s < 500
+      headers: BROWSER_HEADERS, timeout: 6000, validateStatus: s => true, maxRedirects: 3
     });
-    return { found: r.status === 200, score: r.status === 200 ? 35 : 5 };
-  } catch { return { found: false, score: 5 }; }
+    const body = typeof r.data === 'string' ? r.data.toLowerCase() : '';
+    const wall = r.status === 999 || r.status === 429 ||
+      body.includes('authwall') || body.includes('join linkedin') ||
+      (body.includes('anmelden') && body.includes('registrieren'));
+    if (wall) return { found: false, checkable: false, score: 0, note: 'LinkedIn nicht pruefbar (Login-Wand)' };
+    return { found: r.status === 200 && body.length > 500, checkable: true, score: 0 };
+  } catch { return { found: false, checkable: false, score: 0 }; }
 }
 
 async function checkCareerPage(query) {
@@ -328,8 +340,8 @@ async function checkCareerPage(query) {
         html.includes('imagevideo') ||
         html.includes('arbeitgebervideo') ||
         $('iframe[src*="youtube"], iframe[src*="vimeo"], video').length > 0;
-      if (hasVideo) { score += 20; criteria.push('📹 Imagevideo vorhanden'); }
-      else { criteria.push('❌ Kein Imagevideo'); }
+      if (hasVideo) { score += 20; criteria.push('Imagevideo vorhanden'); }
+      else { criteria.push('Kein Imagevideo'); }
 
       // 2. Offene Stellen direkt auf der Seite → +15 Punkte
       const hasJobs =
@@ -338,8 +350,8 @@ async function checkCareerPage(query) {
         text.includes('jetzt bewerben') ||
         text.includes('stellenausschreibung') ||
         $('a[href*="stell"], a[href*="job"], a[href*="bewerbung"]').length > 2;
-      if (hasJobs) { score += 15; criteria.push('✅ Stellenangebote sichtbar'); }
-      else { criteria.push('❌ Keine Stellenangebote sichtbar'); }
+      if (hasJobs) { score += 15; criteria.push('Stellenangebote sichtbar'); }
+      else { criteria.push('Keine Stellenangebote sichtbar'); }
 
       // 3. Arbeitgeberversprechen / Benefits → +10 Punkte
       const hasBenefits =
@@ -351,15 +363,15 @@ async function checkCareerPage(query) {
         text.includes('flexible arbeitszeit') ||
         text.includes('weiterbildung') ||
         text.includes('warum wir');
-      if (hasBenefits) { score += 10; criteria.push('✅ Benefits / Arbeitgeberversprechen'); }
-      else { criteria.push('❌ Keine Benefits kommuniziert'); }
+      if (hasBenefits) { score += 10; criteria.push('Benefits / Arbeitgeberversprechen'); }
+      else { criteria.push('Keine Benefits kommuniziert'); }
 
       // 4. Bilder / Fotos von echten Mitarbeitern → +8 Punkte
       const hasImages =
         $('img').length > 3 &&
         (html.includes('team') || html.includes('mitarbeiter') || html.includes('kollegen'));
-      if (hasImages) { score += 8; criteria.push('✅ Team-Bilder vorhanden'); }
-      else { criteria.push('❌ Keine Team-Bilder erkannt'); }
+      if (hasImages) { score += 8; criteria.push('Team-Bilder vorhanden'); }
+      else { criteria.push('Keine Team-Bilder erkannt'); }
 
       // 5. Kontakt / Ansprechpartner → +7 Punkte
       const hasContact =
@@ -369,13 +381,13 @@ async function checkCareerPage(query) {
         text.includes('hr-team') ||
         text.includes('bewerbung@') ||
         $('a[href^="mailto:"]').length > 0;
-      if (hasContact) { score += 7; criteria.push('✅ Ansprechpartner / Kontakt'); }
-      else { criteria.push('❌ Kein Ansprechpartner'); }
+      if (hasContact) { score += 7; criteria.push('Ansprechpartner / Kontakt'); }
+      else { criteria.push('Kein Ansprechpartner'); }
 
       // 6. Mobiloptimierung (viewport meta tag) → +5 Punkte
       const hasMobile = html.includes('viewport') && html.includes('width=device-width');
-      if (hasMobile) { score += 5; criteria.push('✅ Mobiloptimiert'); }
-      else { criteria.push('❌ Nicht mobiloptimiert'); }
+      if (hasMobile) { score += 5; criteria.push('Mobiloptimiert'); }
+      else { criteria.push('Nicht mobiloptimiert'); }
 
       console.log(`Career page: ${url} → score ${score}, video: ${hasVideo}`);
 
@@ -393,22 +405,32 @@ async function checkCareerPage(query) {
       };
     } catch { continue; }
   }
-  return { found: false, score: 5, criteria: ['❌ Keine Karriereseite gefunden'] };
+  return { found: false, score: 5, criteria: ['Keine Karriereseite gefunden'] };
 }
 
 async function checkJobPortals(query) {
+  // Fix 1b-3: max 20 Punkte (neue EB-Skala), keine Geschenk-Punkte mehr,
+  // und Abruf-Fehler werden als error markiert statt wie "0 Jobs" auszusehen.
   try {
     const r = await axios.get(`https://www.stepstone.de/jobs/${encodeURIComponent(query)}`, {
       headers: BROWSER_HEADERS, timeout: 6000, validateStatus: s => s < 500
     });
+    if (r.status !== 200) {
+      return { found: false, score: 0, error: 'Stepstone blockiert (Status ' + r.status + ')' };
+    }
     const $ = cheerio.load(r.data);
-    const cnt = parseInt($('[data-testid="jobs-count"]').text().replace(/\D/g,'')) || 0;
-    return { found: cnt > 0, jobCount: cnt, score: Math.min(25, cnt * 3 + 5) };
-  } catch { return { found: false, score: 5 }; }
+    const el = $('[data-testid="jobs-count"]');
+    if (!el.length) {
+      // Selektor greift nicht — Seitenstruktur geaendert oder Bot-Wand
+      return { found: false, score: 0, error: 'Stepstone-Zaehler nicht lesbar' };
+    }
+    const cnt = parseInt(el.text().replace(/\D/g,'')) || 0;
+    return { found: cnt > 0, jobCount: cnt, score: Math.min(20, cnt * 3) };
+  } catch (e) { return { found: false, score: 0, error: 'Stepstone nicht erreichbar' }; }
 }
 
 const PORT = process.env.PORT || 3001;
 app.listen(PORT, () => {
-  console.log(`✅ Talency Analyzer API → http://localhost:${PORT}`);
+  console.log(`Talency Analyzer API → http://localhost:${PORT}`);
   console.log(`   /api/meta-validate · /api/meta-ads · /api/kununu · /api/employer-branding`);
 });
