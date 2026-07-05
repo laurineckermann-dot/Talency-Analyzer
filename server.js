@@ -89,7 +89,7 @@ app.get('/api/kununu', async (req, res) => {
   const TIME_BUDGET_MS = 20000;
 
   // A4: Request-Fehler (Netzwerk/Timeout) getrennt von "kein Profil" zählen
-  let attempts = 0, fetchErrors = 0;
+  let attempts = 0, fetchErrors = 0, blocked = 0;
 
   // Fix 1b-4: Die Kununu-Suche laeuft IMMER (sie findet den echten Slug,
   // z.B. "landeshauptstadt-muenchen"). Client-Slugs werden nur angehaengt.
@@ -149,7 +149,20 @@ app.get('/api/kununu', async (req, res) => {
       const resp = await axios.get(profileUrl, {
         headers: BROWSER_HEADERS, timeout: 5000, validateStatus: s => s < 500
       });
-      if (resp.status !== 200 || resp.data.length < 500) continue;
+      // Diagnose: Status und Groesse jedes Versuchs loggen
+      const bodyLen = typeof resp.data === 'string' ? resp.data.length : 0;
+      console.log('Kununu try:', slug, '-> status', resp.status, ', length', bodyLen);
+
+      // Bot-Blockade erkennen: 403/429 oder Captcha-/DataDome-Seite
+      const bodyStart = typeof resp.data === 'string' ? resp.data.slice(0, 4000).toLowerCase() : '';
+      if (resp.status === 403 || resp.status === 429 ||
+          bodyStart.includes('datadome') || bodyStart.includes('captcha-delivery') ||
+          bodyStart.includes('captcha') || bodyStart.includes('access denied')) {
+        blocked++;
+        console.log('Kununu BLOCKED at slug:', slug);
+        continue;
+      }
+      if (resp.status !== 200 || bodyLen < 500) continue;
 
       const $ = cheerio.load(resp.data);
 
@@ -216,17 +229,20 @@ app.get('/api/kununu', async (req, res) => {
     } catch(e) { fetchErrors++; console.log('Kununu slug failed:', slug, e.message); continue; }
   }
 
-  // A4: unterscheiden — waren alle Requests Fehler (Netzwerk/Timeout/Block)
-  // oder haben wir gültige Antworten bekommen, nur ohne passendes Profil?
-  const unreachable = attempts > 0 && fetchErrors === attempts;
+  // A4: unterscheiden — Blockade / alle Requests fehlgeschlagen / wirklich kein Profil
+  const unreachable = blocked > 0 || (attempts > 0 && fetchErrors === attempts);
   console.log(
-    unreachable
-      ? 'Kununu UNREACHABLE for "' + query + '" (' + fetchErrors + '/' + attempts + ' Requests fehlgeschlagen)'
-      : 'Kununu: no profile found for "' + query + '", tried: ' + slugVariants.join(', ')
+    blocked > 0
+      ? 'Kununu BLOCKED for "' + query + '" (' + blocked + ' blockierte Antworten)'
+      : unreachable
+        ? 'Kununu UNREACHABLE for "' + query + '" (' + fetchErrors + '/' + attempts + ' Requests fehlgeschlagen)'
+        : 'Kununu: no profile found for "' + query + '", tried: ' + slugVariants.join(', ')
   );
   res.json({
     found: false, query, candidateScore: 0,
-    error: unreachable ? 'Kununu nicht erreichbar (Netzwerk/Timeout)' : null,
+    error: blocked > 0
+      ? 'Kununu blockiert Server-Anfragen (Bot-Schutz)'
+      : unreachable ? 'Kununu nicht erreichbar (Netzwerk/Timeout)' : null,
     reason: unreachable ? 'Kununu nicht erreichbar' : 'Kein Kununu-Profil gefunden'
   });
 });
