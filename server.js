@@ -84,9 +84,17 @@ app.get('/api/kununu', async (req, res) => {
   let slugVariants = [];
   try { slugVariants = slugsParam ? JSON.parse(slugsParam) : []; } catch {}
 
+  // A5: Gesamt-Zeitbudget — muss unter dem Frontend-Timeout (25s) bleiben
+  const started = Date.now();
+  const TIME_BUDGET_MS = 18000;
+
+  // A4: Request-Fehler (Netzwerk/Timeout) getrennt von "kein Profil" zählen
+  let attempts = 0, fetchErrors = 0;
+
   // Step 1: Kununu search to find correct slug
   if (!slugVariants.length) {
     try {
+      attempts++;
       const searchResp = await axios.get(
         'https://www.kununu.com/de/search?term=' + encodeURIComponent(query),
         { headers: BROWSER_HEADERS, timeout: 8000, validateStatus: s => s < 500 }
@@ -99,7 +107,7 @@ app.get('/api/kununu', async (req, res) => {
           if (!slugVariants.includes(slug)) slugVariants.unshift(slug);
         }
       });
-    } catch(e) { console.log('Kununu search failed:', e.message); }
+    } catch(e) { console.log('Kununu search failed:', e.message); fetchErrors++; }
 
     // Manual slug variants as fallback
     const norm = query.toLowerCase()
@@ -116,11 +124,20 @@ app.get('/api/kununu', async (req, res) => {
     extras.forEach(s => { if (!slugVariants.includes(s)) slugVariants.push(s); });
   }
 
+  // A5: maximal 5 Slug-Varianten testen (statt bis zu ~10)
+  slugVariants = slugVariants.slice(0, 5);
+
   for (const slug of slugVariants) {
+    // A5: Zeitbudget prüfen, bevor der nächste Slug probiert wird
+    if (Date.now() - started > TIME_BUDGET_MS) {
+      console.log('Kununu: Zeitbudget erreicht, breche Slug-Suche ab');
+      break;
+    }
     const profileUrl = 'https://www.kununu.com/de/' + slug;
     try {
+      attempts++;
       const resp = await axios.get(profileUrl, {
-        headers: BROWSER_HEADERS, timeout: 9000, validateStatus: s => s < 500
+        headers: BROWSER_HEADERS, timeout: 6000, validateStatus: s => s < 500
       });
       if (resp.status !== 200 || resp.data.length < 500) continue;
 
@@ -173,21 +190,35 @@ app.get('/api/kununu', async (req, res) => {
 
       console.log('Kununu found:', query, '-> slug:', slug, 'score:', overallScore, 'reviews:', reviewCount);
 
+      // A2: keine erfundenen Default-Werte mehr —
+      // fehlender Score oder fehlende Empfehlungsrate ergeben 0 Teilpunkte
+      const scorePart = overallScore !== null ? (overallScore / 5) * 60 : 0;
+      const recPart = recommendRate !== null ? recommendRate * 0.3 : 0;
+
       return res.json({
         found: true, query, slug, profileUrl,
         overallScore, reviewCount, recommendRate,
         reviews: reviews.slice(0,3),
         candidateScore: Math.min(100, Math.round(
-          ((overallScore || 3) / 5) * 60 +
-          (recommendRate ? recommendRate * 0.3 : 15) +
-          Math.min(10, reviewCount)
+          scorePart + recPart + Math.min(10, reviewCount)
         ))
       });
-    } catch(e) { console.log('Kununu slug failed:', slug, e.message); continue; }
+    } catch(e) { fetchErrors++; console.log('Kununu slug failed:', slug, e.message); continue; }
   }
 
-  console.log('Kununu: no profile found for "' + query + '", tried:', slugVariants.join(', '));
-  res.json({ found: false, query, candidateScore: 0, reason: 'Kein Kununu-Profil gefunden' });
+  // A4: unterscheiden — waren alle Requests Fehler (Netzwerk/Timeout/Block)
+  // oder haben wir gültige Antworten bekommen, nur ohne passendes Profil?
+  const unreachable = attempts > 0 && fetchErrors === attempts;
+  console.log(
+    unreachable
+      ? 'Kununu UNREACHABLE for "' + query + '" (' + fetchErrors + '/' + attempts + ' Requests fehlgeschlagen)'
+      : 'Kununu: no profile found for "' + query + '", tried: ' + slugVariants.join(', ')
+  );
+  res.json({
+    found: false, query, candidateScore: 0,
+    error: unreachable ? 'Kununu nicht erreichbar (Netzwerk/Timeout)' : null,
+    reason: unreachable ? 'Kununu nicht erreichbar' : 'Kein Kununu-Profil gefunden'
+  });
 });
 
 // ── EMPLOYER BRANDING ─────────────────────────────────────────────
